@@ -1,0 +1,107 @@
+name: eShopOnWeb CI-CD with ARM Template
+
+on:
+  push:
+    branches:
+      - test-dev
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  RESOURCE-GROUP: rg-eshoponweb-testdev
+  LOCATION: westus2
+  ARM-TEMPLATE-FILE: infra/appservice-arm-template.json
+  SUBSCRIPTION-ID: ca352602-6485-408b-88eb-b4c1bafddb51
+  WEBAPP-NAME: eshoponweb-testdev-webapp
+
+jobs:
+  # Stage 1: Build, Test, and Generate Artifact
+  buildandtest:
+    name: Build, Test and Publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.x"
+          dotnet-quality: "preview"
+
+      - name: Restore dependencies
+        run: dotnet restore ./eShopOnWeb.sln
+
+      - name: Build with dotnet
+        run: dotnet build ./eShopOnWeb.sln --configuration Release --no-restore
+
+      - name: Test with dotnet
+        run: dotnet test ./eShopOnWeb.sln --configuration Release --no-build
+
+      - name: Publish application
+        run: |
+          dotnet publish ./src/Web/Web.csproj -c Release -o ${{env.DOTNET_ROOT}}/myapp
+          cd ${{env.DOTNET_ROOT}}/myapp
+          zip -r ../app.zip .
+
+      - name: Upload application artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: dotnet-app
+          path: ${{env.DOTNET_ROOT}}/app.zip
+
+      - name: Upload ARM template artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: arm-template
+          path: ${{ env.ARM-TEMPLATE-FILE }}
+
+  # Stage 2: Deploy artifact to Azure App Service using ARM Template
+  deploy:
+    name: Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    needs: buildandtest
+    environment:
+      name: "Development"
+    steps:
+      - name: Download application artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: dotnet-app
+          path: dotnet-app
+
+      - name: Download ARM template artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: arm-template
+          path: arm-template
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Azure App Service via ARM Template
+        uses: azure/arm-deploy@v2
+        with:
+          subscriptionId: ${{ env.SUBSCRIPTION-ID }}
+          resourceGroupName: ${{ env.RESOURCE-GROUP }}
+          template: arm-template/appservice-arm-template.json
+          parameters: >
+            webAppName=${{ env.WEBAPP-NAME }}
+            location=${{ env.LOCATION }}
+            sku=S1
+            aspnetcoreEnvironment=Development
+          failOnStdErr: false
+
+      - name: Deploy application to Azure App Service
+        uses: Azure/cli@v2
+        with:
+          inlineScript: |
+            az webapp deploy \
+              --name ${{ env.WEBAPP-NAME }} \
+              --resource-group ${{ env.RESOURCE-GROUP }} \
+              --src-path dotnet-app/app.zip \
+              --type zip
